@@ -1,4 +1,4 @@
-# CalvertSandyBeachMicrobiomes
+# Calvert Sandy Beach Microbiomes
 Data from Okamoto et al. 2022
 
 Metabarcode sequences from intertidal transects of sandy beaches from Calvert Island, British Columbia, Canada.
