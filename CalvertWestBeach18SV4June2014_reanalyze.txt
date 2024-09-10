@@ -1,0 +1,337 @@
+#download Calvert Island West Beach June 2014 samples from ENA
+#PRJEB24000 (for samples collected in June 2014)
+
+#activate qiime2
+source activate qiime2-2022.2
+
+#IMPORT paired-end sequences, 2 files per sample (forward and reverse)
+#The manifest file is tab-separated, specifying the path to the fastq files:
+sample-id     forward-absolute-filepath       reverse-absolute-filepath
+
+#import the sequences
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path HakaiBeach18SV4June2014_manifest.txt \
+  --output-path HakaiBeach18SV4June2014_demux.qza \
+  --input-format PairedEndFastqManifestPhred33V2
+
+#get summary of imported sequences
+qiime demux summarize \
+  --i-data HakaiBeach18SV4June2014_demux.qza \
+  --o-visualization HakaiBeach18SV4June2014_demux.qzv
+
+#TRIM 3' ADAPTERS
+# can do cutadapt step here, if didn't do previously
+#use cutadapt to trim/remove adapter sequences on the 3' end of reads, meaning PCR product was short and sequence read went through to the 3' end of the PCR product
+
+#p-adapter-f is looking for the reverse primer on the 3' end of the first, forward read - so need to enter the reverse complement of the reverse primer e.g. reverse complement of 
+E1009R— AYGGTATCTRATCRTCTTYG
+
+#p-adapter-r is looking for the forward primer on the 3' end of the second, reverse read - so need to enter the reverse complement of the forward primer e.g. reverse complement of E572F—CYGCGGTAATTCCAGCTC
+
+#cut adapters
+qiime cutadapt trim-paired \
+--p-cores 10 \
+--i-demultiplexed-sequences HakaiBeach18SV4June2014_demux.qza \
+--p-adapter-f CRAAGAYGATYAGATACCRT \
+--p-adapter-r GAGCTGGAATTACCGCRG \
+--o-trimmed-sequences HakaiBeach18SV4June2014_cutadapt.qza
+
+#get summary and visualization of trimmed sequences
+qiime demux summarize \
+  --i-data HakaiBeach18SV4June2014_cutadapt.qza \
+  --o-visualization HakaiBeach18SV4June2014_cutadapt.qzv
+
+
+#TRIM seqs, CORRECT errors based on quality (de-noise), de-replicate, MERGE, REMOVE CHIMERAS using dada2 (https://benjjneb.github.io/dada2/index.html)
+
+#FYI,  --p-trunc-len-f and --p-trunc-len-r are the final lengths, after 5' trimming
+#so, for this parameter, need to decide on 3' coordinate to trim based on quality scores, then subtract the number of bases that are being trimmed on the 5' end.
+
+#add pooling parameter, to consider all reads across samples, and not by individual samples (single), i.e.:
+*--p-pooling-method pseudo (and not independent) may be a better choice for keeping singletons that are real and not errors (see Bardenhorst et al. 2022)
+
+#F reads - position 272, last position before lower quartile quality goes below 15
+272 - 18 (length of F primer) = 254
+#R reads - position 211, last position before lower quartile quality goes below 15
+211 - 20 (length of R primer) = 191
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs HakaiBeach18SV4June2014_cutadapt.qza \
+  --o-table HakaiBeach18SV4June2014_otutable \
+  --o-representative-sequences HakaiBeach18SV4June2014_repseqs \
+  --o-denoising-stats HakaiBeach18SV4June2014_dada2stats \
+  --p-trim-left-f 18 \
+  --p-trim-left-r 20 \
+  --p-trunc-len-f 254 \
+  --p-trunc-len-r 191 \
+  --p-n-threads 20 \
+  --p-pooling-method pseudo
+
+#summarize and view stats file
+qiime metadata tabulate \
+  --m-input-file HakaiBeach18SV4June2014_dada2stats.qza \
+  --o-visualization HakaiBeach18SV4June2014_dada2stats.qzv
+
+#tons of reads lost on merging.  Try again with less trimming.
+#in paper, reads were merged using PEAR, so could do it like this:
+#cutadapt -q 15,15 -n 1 -m 100 -a CRAAGAYGATYAGATACCRT -A GAGCTGGAATTACCGCRG -o out1_cutadapt.fastq -p out2_cutadapt.fastq in1.fastq in2.fastq
+#pear -f out1_cutadapt.fastq -r out2_cutadapt.fastq -o merged.fastq -q 15 -j 20 -t 50
+
+#but changed trimming to median below 20
+#F reads - position 301, last position before media quality goes below 20
+301 - 18 (length of F primer) = 283
+#R reads - position 283, last position before median quality goes below 20
+283 - 20 (length of R primer) = 263
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs HakaiBeach18SV4June2014_cutadapt.qza \
+  --o-table HakaiBeach18SV4June2014_otutable2 \
+  --o-representative-sequences HakaiBeach18SV4June2014_repseqs2 \
+  --o-denoising-stats HakaiBeach18SV4June2014_dada2stats2 \
+  --p-trim-left-f 18 \
+  --p-trim-left-r 20 \
+  --p-trunc-len-f 283 \
+  --p-trunc-len-r 263 \
+  --p-n-threads 20 \
+  --p-pooling-method pseudo
+
+#summarize and view stats file
+qiime metadata tabulate \
+  --m-input-file HakaiBeach18SV4June2014_dada2stats2.qza \
+  --o-visualization HakaiBeach18SV4June2014_dada2stats2.qzv
+
+#OK, decent number of sequences now.  
+#Check which samples were removed from previous analysis - usually due to low number of sequences per sample.  In previous analysis, samples with less than 8000 reads were removed.  For this analysis, this will also include 3rd beach 3.5B - but this was not removed before.  Going to remove it here.  
+
+#FILTER FEATURE TABLE (i.e otu or asv table) based on the distribution of reads for each feature
+# based on previous analysis, remove ASVs that are represented by 5 or less reads
+
+qiime feature-table filter-features \
+   --i-table HakaiBeach18SV4June2014_otutable2.qza \
+   --p-min-frequency 5 \
+   --p-min-samples 1 \
+   --o-filtered-table HakaiBeach18SV4June2014_otutable2_min5.qza
+
+#get summary/visualization of otutable after ASV and sample filtering
+qiime feature-table summarize \
+  --i-table HakaiBeach18SV4June2014_otutable2_min5.qza \
+  --o-visualization HakaiBeach18SV4June2014_otutable2_min5.qzv \
+
+#FILTER SAMPLES that have too few reads, remove samples with < 8000 reads
+qiime feature-table filter-samples \
+	--i-table HakaiBeach18SV4June2014_otutable2_min5.qza \
+	--p-min-frequency 8000 \
+	--o-filtered-table HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qza
+
+#get summary/visualization of otutable after ASV and sample filtering
+qiime feature-table summarize \
+  --i-table HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qza \
+  --o-visualization HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qzv \
+  --m-sample-metadata-file 201406_18Sv4_metadata_map_rmlow.txt
+
+#5,092 ASVs
+
+
+#FILTER REPRESENTATIVE SEQUENCES (repseqs)
+
+qiime feature-table filter-seqs \
+  --i-data HakaiBeach18SV4June2014_repseqs2.qza \
+  --i-table HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qza \
+  --o-filtered-data HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.qza
+
+#export these sequences in fasta format
+
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.qza \
+  --output-path HakaiBeach_repseqs
+#generates DNA_sequences.fasta
+#rename
+mv ./HakaiBeach_repseqs/dna-sequences.fasta HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.fasta
+#remove empty directory
+rmdir HakaiBeach_repseqs
+
+#TAXONOMIC ASSIGNMENT/IDENTIFICATION
+
+#classifier used in paper is not trained with latest version of PR2
+# PR2 version 4.12.0 18SV4_E572F_E1009R
+# /data/tax_databases/pr2/pr2_qiime2/pr2_v4.12.0_18SV4_E572F_E1009R_classifier.qza
+
+#use PR2 version 5.0.0, 560F - 1055F
+#so not the exact same primers, but close enough
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier /data/tax_databases/pr2/PR2v5.0.0/qiime_files/pr2_version_5.0.0_SSU_560F_1055R_classifier.qza \
+  --i-reads HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.qza \
+  --o-classification HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza
+  --p-n-jobs 20
+
+#generate barplots showing relative abundance of reads at different taxonomic levels by sample
+
+qiime taxa barplot \
+  --i-table HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --m-metadata-file 201406_18Sv4_metadata_map_rmlow.txt \
+  --o-visualization HakaiBeach18SV4June2014_taxabarplot_min5_samplemin8000.qzv
+
+#export taxonomy to tsv table
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --output-path ./
+
+#generates taxonomy.tsv
+#using nano, change header from: Feature ID	Taxon	Confidence
+#to:
+#OTUID	taxonomy	confidence 
+#so that taxonomy can be merged with otu table
+
+#rename filename
+mv taxonomy.tsv HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.tsv
+
+
+
+#FILTER OTU TABLE
+#remove bacteria and archaea sequences
+qiime taxa filter-table \
+  --i-table HakaiBeach18SV4June2014_otutable2_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --p-exclude bacteria,archaea \
+  --o-filtered-table HakaiBeach18SV4June2014_otutable2_noBacArc_min5_samplemin8000.qza
+
+#METAZOANS
+#filter otu table for METAZOANS only
+qiime taxa filter-table \
+  --i-table HakaiBeach18SV4June2014_otutable2_noBacArc_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --p-include metazoa \
+  --o-filtered-table HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qza
+
+qiime taxa barplot \
+  --i-table HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --m-metadata-file 201406_18Sv4_metadata_map_rmlow.txt \
+  --o-visualization HakaiBeach18SV4June2014_taxabarplot_METAZOANS_min5_samplemin8000.qzv
+
+qiime feature-table summarize \
+  --i-table HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qza \
+  --o-visualization HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qzv \
+  --m-sample-metadata-file 201406_18Sv4_metadata_map_rmlow.txt
+
+#669 ASVs
+
+#filter for metazoan sequences
+qiime feature-table filter-seqs \
+  --i-data HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.qza \
+  --i-table HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qza \
+  --o-filtered-data HakaiBeach18SV4June2014_repseqs2_METAZOANS_min5_samplemin8000.qza
+
+#export these sequences in fasta format
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_repseqs2_METAZOANS_min5_samplemin8000.qza \
+  --output-path HakaiBeach_repseqs
+#generates DNA_sequences.fasta
+#rename
+mv ./HakaiBeach_repseqs/dna-sequences.fasta HakaiBeach18SV4June2014_repseqs2_METAZOANS_min5_samplemin8000.fasta
+#remove empty directory
+rmdir HakaiBeach_repseqs
+
+
+#EXPORTING OTU table and taxonomy files to other formats
+#export table into BIOM v2.1.0 format
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.qza \
+  --output-path ./
+#generates feature-table.biom
+
+#to convert from biom format to .txt
+biom convert -i feature-table.biom -o feature-table.tsv --to-tsv
+
+#to add taxonomy to OTU table in BIOM format, taxonomy is in .tsv format
+biom add-metadata -i feature-table.biom -o table-with-taxonomy.biom --observation-metadata-fp HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.tsv --sc-separated taxonomy
+
+#then convert BIOM format to tsv
+biom convert -i table-with-taxonomy.biom -o table-with-taxonomy.tsv --to-tsv --header-key taxonomy
+
+#change filenames from default
+mv feature-table.biom HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.biom
+mv feature-table.tsv HakaiBeach18SV4June2014_otutable2_METAZOANS_min5_samplemin8000.tsv
+
+mv table-with-taxonomy.biom HakaiBeach18SV4June2014_otutablewithtaxonomy_METAZOANS_min5_samplemin8000.biom
+
+mv table-with-taxonomy.tsv HakaiBeach18SV4June2014_otutablewithtaxonomy_METAZOANS_min5_samplemin8000.tsv
+
+
+
+#PROTISTS
+#filter otu table for PROTISTS, i.e. not metazoans
+qiime taxa filter-table \
+  --i-table HakaiBeach18SV4June2014_otutable2_noBacArc_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --p-exclude metazoa \
+  --o-filtered-table HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qza
+
+qiime taxa barplot \
+  --i-table HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qza \
+  --i-taxonomy HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.qza \
+  --m-metadata-file 201406_18Sv4_metadata_map_rmlow.txt \
+  --o-visualization HakaiBeach18SV4June2014_taxabarplot_PROTISTS_min5_samplemin8000.qzv
+
+qiime feature-table summarize \
+  --i-table HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qza \
+  --o-visualization HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qzv \
+  --m-sample-metadata-file 201406_18Sv4_metadata_map_rmlow.txt
+
+# 4,417 ASVs
+
+#filter for protist sequences
+qiime feature-table filter-seqs \
+  --i-data HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.qza \
+  --i-table HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qza \
+  --o-filtered-data HakaiBeach18SV4June2014_repseqs2_PROTISTS_min5_samplemin8000.qza
+
+#export these sequences in fasta format
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_repseqs2_PROTISTS_min5_samplemin8000.qza \
+  --output-path HakaiBeach_repseqs
+#generates DNA_sequences.fasta
+#rename
+mv ./HakaiBeach_repseqs/dna-sequences.fasta HakaiBeach18SV4June2014_repseqs2_PROTISTS_min5_samplemin8000.fasta
+#remove empty directory
+rmdir HakaiBeach_repseqs
+
+#EXPORTING OTU table and taxonomy files to other formats
+#export table into BIOM v2.1.0 format
+qiime tools export \
+  --input-path HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.qza \
+  --output-path ./
+#generates feature-table.biom
+
+#to convert from biom format to .txt
+biom convert -i feature-table.biom -o feature-table.tsv --to-tsv
+
+#to add taxonomy to OTU table in BIOM format, taxonomy is in .tsv format
+biom add-metadata -i feature-table.biom -o table-with-taxonomy.biom --observation-metadata-fp HakaiBeach18SV4June2014_taxonomy_min5_samplemin8000.tsv --sc-separated taxonomy
+
+#then convert BIOM format to tsv
+biom convert -i table-with-taxonomy.biom -o table-with-taxonomy.tsv --to-tsv --header-key taxonomy
+
+#change filenames from default
+mv feature-table.biom HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.biom
+mv feature-table.tsv HakaiBeach18SV4June2014_otutable2_PROTISTS_min5_samplemin8000.tsv
+
+mv table-with-taxonomy.biom HakaiBeach18SV4June2014_otutablewithtaxonomy_PROTISTS_min5_samplemin8000.biom
+
+mv table-with-taxonomy.tsv HakaiBeach18SV4June2014_otutablewithtaxonomy_PROTISTS_min5_samplemin8000.tsv
+
+
+#rename sequence and otu table files for git hub repository
+
+mv HakaiBeach18SV4June2014_repseqs2_min5_samplemin8000.fasta CalvertSandyBeaches_2014Jun_18SV4_repseqs.fas
+
+mv WestBeachSand_18SV4_rep_seqs97_min5.fasta CalvertWestBeachSand_2014Jun_2016Jan_18SV4_repseqs.fas
+
+mv HakaiBeach18SV4June2014_otutablewithtaxonomy_METAZOANS_min5_samplemin8000.tsv CalvertSandyBeaches_2014Jun_18SV4_metazoans_otutable.txt
+
+mv HakaiBeach18SV4June2014_otutablewithtaxonomy_PROTISTS_min5_samplemin8000.tsv CalvertSandyBeaches_2014Jun_18SV4_protists_otutable.txt
+
+
